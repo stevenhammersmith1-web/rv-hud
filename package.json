@@ -1,0 +1,23 @@
+{
+  "name": "rv-hud",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "RV heads-up display — live ECM data over Web Bluetooth with a built-in simulator",
+  "scripts": {
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "dev": "vite",
+    "build": "npm run gen:icons && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.20.5"
+  }
+}
