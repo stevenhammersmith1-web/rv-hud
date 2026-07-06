@@ -30,5 +30,24 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/main.jsx"></script>
+    <script>
+      /* Plain ES5 — runs on any browser. If the app bundle never executes
+         (e.g. a browser too old to run it), #root stays empty and the screen
+         looks black. Replace that with a readable message + the browser string
+         so the problem is diagnosable instead of a blank screen. */
+      setTimeout(function () {
+        var root = document.getElementById("root");
+        if (root && root.childElementCount === 0) {
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;font-family:system-ui,sans-serif;color:#EAF2FF;text-align:center;background:#060A12">' +
+            '<div style="font-size:20px;font-weight:700">RV HUD couldn’t start</div>' +
+            '<div style="font-size:14px;color:#9fb3d1;max-width:520px;line-height:1.5">This usually means the browser is out of date. Open the Play Store, update <b>Google Chrome</b> to the latest version, then reopen this app.</div>' +
+            '<div style="font-size:12px;color:#6b7f9e;max-width:520px">If it still fails, send this line:</div>' +
+            '<code style="font-size:11px;color:#7f93b3;word-break:break-all;max-width:520px">' +
+            navigator.userAgent +
+            "</code></div>";
+        }
+      }, 5000);
+    </script>
   </body>
 </html>

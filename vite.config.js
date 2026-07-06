@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import legacy from "@vitejs/plugin-legacy";
 import { VitePWA } from "vite-plugin-pwa";
 
 // For GitHub Pages *project* sites the app is served from /<repo>/, so set
@@ -11,6 +12,10 @@ export default defineConfig({
   base,
   plugins: [
     react(),
+    // Emit an extra nomodule/SystemJS bundle + polyfills so older Chrome/WebView
+    // versions (common on rugged field tablets) can run the app instead of
+    // silently failing to a black screen.
+    legacy({ targets: ["defaults", "Android >= 6", "Chrome >= 61"] }),
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
