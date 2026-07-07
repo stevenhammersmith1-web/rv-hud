@@ -30,7 +30,9 @@ const CONFIG = {
     // 12V chassis: healthy charge 13.5-14.8V. Low = discharge/no-charge;
     // high (warn/crit) = voltage-regulator overcharge cooking the batteries.
     volts:    { label: "BATTERY",    unit: "V",   min: 10,  max: 15,  warnBelow: 12.2, critBelow: 11.6, warn: 15.0, crit: 15.5 },
-    intake:   { label: "INTAKE AIR", unit: "°F",  min: 40,  max: 220, warn: 150, crit: 180, temp: true },
+    // Intake manifold air temp: hot on grades even when healthy, so warn/crit
+    // sit at derate-territory numbers to avoid nuisance beeps on hot-day climbs.
+    intake:   { label: "INTAKE AIR", unit: "°F",  min: 40,  max: 220, warn: 170, crit: 190, temp: true },
     throttle: { label: "THROTTLE",   unit: "%",   min: 0,   max: 100 },
     fuelrate: { label: "FUEL RATE",  unit: "gph", min: 0,   max: 20 },
     hours:    { label: "ENGINE HRS", unit: "h" },
@@ -153,6 +155,65 @@ function mapBridgeData(b) {
   };
 }
 const DEFAULT_DATA = { speed: 0, rpm: 600, coolant: 168, oil: 44, fuel: 0.6, boost: 0, trans: 150, volts: 12.6, intake: 95, throttle: 0 };
+
+/* ------------------------- alarm monitors -------------------------------- */
+/* Every channel that should beep + drop a banner when out of range. Each
+   returns "none" | "warn" | "crit" (warn = orange, crit = red + flash), the
+   same levels the coolant alarm already drives. Thresholds come from each
+   gauge's cfg (the factory-tuned values above). */
+const RANK = { none: 0, warn: 1, crit: 2 };
+
+// Once a channel is alarming, hold it until the value clears the threshold by a
+// small margin — stops the beep from chattering when a value hovers on the line.
+function nearThreshold(cfg, v) {
+  const range = ((cfg.max != null ? cfg.max : 100) - (cfg.min != null ? cfg.min : 0)) || 100;
+  const m = range * 0.04;
+  if (cfg.invert) return cfg.warnBelow != null && v <= cfg.warnBelow + m;
+  let near = false;
+  if (cfg.warn != null) near = near || v >= cfg.warn - m;
+  if (cfg.warnBelow != null) near = near || v <= cfg.warnBelow + m;
+  return near;
+}
+function genLevel(cfg) {
+  return (v, prev) => {
+    if (!isNum(v)) return "none"; // no data → no alarm
+    const z = zoneOf(cfg, v);
+    let lvl = z === "normal" ? "none" : z;
+    if (prev !== "none" && lvl === "none" && nearThreshold(cfg, v)) lvl = prev; // hysteresis
+    return lvl;
+  };
+}
+// Coolant keeps its own hysteresis (CONFIG.alert) so its behavior is unchanged.
+function coolantLevel(v, prev) {
+  const A = CONFIG.alert;
+  if (!isNum(v)) return "none";
+  if (v >= A.critTemp) return "crit";
+  if (v >= A.warnTemp) return "warn";
+  if (v < A.resetTemp) return "none";
+  return prev !== "none" ? "warn" : "none";
+}
+const MONITORS = [
+  { key: "coolant", read: (d) => d.coolant, level: coolantLevel,
+    fmt: (d, tu) => na(d.coolant, (v) => Math.round(tmp(v, tu))) + tmpLabel(tu),
+    message: (lvl) => (lvl === "crit" ? "COOLANT CRITICAL — REDUCE LOAD NOW" : "COOLANT HIGH — WATCH TEMPERATURE") },
+  { key: "oil", read: (d) => d.oil, level: genLevel(CONFIG.gauges.oil),
+    fmt: (d) => na(d.oil, (v) => Math.round(v)) + " PSI",
+    message: (lvl) => (lvl === "crit" ? "OIL PRESSURE CRITICAL — STOP ENGINE" : "OIL PRESSURE LOW") },
+  { key: "rpm", read: (d) => d.rpm, level: genLevel(CONFIG.gauges.rpm),
+    fmt: (d) => na(d.rpm, (v) => Math.round(v)) + " RPM",
+    message: (lvl) => (lvl === "crit" ? "ENGINE OVERSPEED — EASE OFF" : "RPM HIGH — NEAR REDLINE") },
+  { key: "trans", read: (d) => d.trans, level: genLevel(CONFIG.channels.trans),
+    fmt: (d, tu) => na(d.trans, (v) => Math.round(tmp(v, tu))) + tmpLabel(tu),
+    message: (lvl) => (lvl === "crit" ? "TRANS TEMP CRITICAL — REDUCE LOAD" : "TRANS TEMP HIGH") },
+  { key: "volts", read: (d) => d.volts, level: genLevel(CONFIG.channels.volts),
+    fmt: (d) => na(d.volts, (v) => v.toFixed(1)) + "V",
+    message: (lvl, v) => (v >= 14
+      ? (lvl === "crit" ? "CHARGING VOLTAGE CRITICAL" : "CHARGING VOLTAGE HIGH")
+      : (lvl === "crit" ? "BATTERY VOLTAGE CRITICAL" : "BATTERY VOLTAGE LOW")) },
+  { key: "intake", read: (d) => d.intake, level: genLevel(CONFIG.channels.intake),
+    fmt: (d, tu) => na(d.intake, (v) => Math.round(tmp(v, tu))) + tmpLabel(tu),
+    message: (lvl) => (lvl === "crit" ? "INTAKE AIR TEMP CRITICAL" : "INTAKE AIR TEMP HIGH") },
+];
 
 /* --------------------------- channel registry ---------------------------- */
 /* Every assignable data source. `arcable` sources can render as a ring gauge;
@@ -321,9 +382,13 @@ export default function RVDashboard() {
   const [heat, setHeat] = useState(false);
   const [timeScale, setTimeScale] = useState(50);
 
-  const [level, setLevel] = useState("none");
+  const [level, setLevel] = useState("none");   // highest active alarm level
   const [muted, setMuted] = useState(false);
-  const ackLevelRef = useRef("none"); const ackTimeRef = useRef(0); const alarmActiveRef = useRef(false);
+  const [alarms, setAlarms] = useState([]);      // all currently-active alarms
+  const ackLevelRef = useRef("none"); const ackTimeRef = useRef(0);
+  const ackKeysRef = useRef(new Set()); const activeKeysRef = useRef([]);
+  const chLevelsRef = useRef({}); const alarmSigRef = useRef("");
+  const unitsRef = useRef({ tu: "F", su: "mph" });
 
   const [trips, setTrips] = useState(emptyTrips());
   const tripsRef = useRef(trips);
@@ -435,26 +500,53 @@ export default function RVDashboard() {
 
   useEffect(() => { const iv = setInterval(() => pSave(TRIPS_KEY, tripsRef.current), 4000); return () => clearInterval(iv); }, []);
 
+  // Evaluate every monitored channel; drive audio off the highest level and the
+  // banner off the full active list. Any channel out of range alerts, not just
+  // coolant.
   useEffect(() => {
     const A = CONFIG.alert;
     const iv = setInterval(() => {
-      const temp = dataRef.current.coolant, wasActive = alarmActiveRef.current;
-      let lvl;
-      if (temp >= A.critTemp) lvl = "crit"; else if (temp >= A.warnTemp) lvl = "warn";
-      else if (temp < A.resetTemp) lvl = "none"; else lvl = wasActive ? "warn" : "none";
-      alarmActiveRef.current = lvl !== "none";
-      if (lvl === "none") { ackLevelRef.current = "none"; if (mutedRef.current) setMuted(false); }
-      else if (mutedRef.current) {
-        const rank = { none: 0, warn: 1, crit: 2 };
-        if (rank[lvl] > rank[ackLevelRef.current]) setMuted(false);
+      const d = dataRef.current, tu = unitsRef.current.tu;
+      const active = [];
+      let overall = "none";
+      for (const m of MONITORS) {
+        const v = m.read(d);
+        const prev = chLevelsRef.current[m.key] || "none";
+        const lvl = m.level(v, prev);
+        chLevelsRef.current[m.key] = lvl;
+        if (lvl !== "none") {
+          active.push({ key: m.key, level: lvl, message: m.message(lvl, v), valueStr: m.fmt(d, tu) });
+          if (RANK[lvl] > RANK[overall]) overall = lvl;
+        }
+      }
+      active.sort((a, b) => RANK[b.level] - RANK[a.level]);
+      const activeKeys = active.map((a) => a.key);
+      activeKeysRef.current = activeKeys;
+
+      if (overall === "none") {
+        ackLevelRef.current = "none"; ackKeysRef.current = new Set();
+        if (mutedRef.current) setMuted(false);
+      } else if (mutedRef.current) {
+        const escalated = RANK[overall] > RANK[ackLevelRef.current];
+        const newAlarm = activeKeys.some((k) => !ackKeysRef.current.has(k));
+        if (escalated || newAlarm) setMuted(false);
         else if (Date.now() - ackTimeRef.current >= A.persistMs) setMuted(false);
       }
-      if (lvl !== levelRef.current) setLevel(lvl);
+
+      if (overall !== levelRef.current) setLevel(overall);
+      const sig = active.map((a) => a.key + a.level + a.valueStr).join("|");
+      if (sig !== alarmSigRef.current) { alarmSigRef.current = sig; setAlarms(active); }
     }, 300);
     return () => clearInterval(iv);
   }, []);
 
-  const acknowledge = () => { if (levelRef.current === "none") return; ackLevelRef.current = levelRef.current; ackTimeRef.current = Date.now(); setMuted(true); };
+  const acknowledge = () => {
+    if (levelRef.current === "none") return;
+    ackLevelRef.current = levelRef.current;
+    ackKeysRef.current = new Set(activeKeysRef.current);
+    ackTimeRef.current = Date.now();
+    setMuted(true);
+  };
   const enableAudio = () => {
     const AC = window.AudioContext || window.webkitAudioContext; const ctx = new AC();
     ctx.resume().finally(() => { const o = ctx.createOscillator(), g = ctx.createGain(); g.gain.value = 0.0001; o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.03); setAudioReady(true); setShowAudioPrompt(false); });
@@ -463,6 +555,7 @@ export default function RVDashboard() {
   const resetTrip = (w) => { tripsRef.current = { ...tripsRef.current, [w]: emptyTrip() }; setTrips({ ...tripsRef.current }); pSave(TRIPS_KEY, tripsRef.current); };
 
   const su = settings.speedUnit, tu = settings.tempUnit;
+  unitsRef.current = { tu, su };  // read by the alarm loop for banner formatting
 
   // Demo controls are hidden in normal (coach) use. The simulator itself stays
   // intact as the automatic fallback when the bridge is offline — this only
@@ -487,7 +580,6 @@ export default function RVDashboard() {
   const saveProfileAs = (name) => { const id = `p-${Date.now().toString(36)}`; setProfiles((ps) => [...ps, { id, name, settings: snap() }]); setActiveProfileId(id); };
   const updateProfile = (id) => setProfiles((ps) => ps.map((p) => (p.id === id ? { ...p, settings: snap() } : p)));
   const deleteProfile = (id) => { setProfiles((ps) => ps.filter((p) => p.id !== id)); setActiveProfileId((a) => (a === id ? null : a)); };
-  const banner = level !== "none" && !muted;
   const bannerColor = level === "crit" ? T.crit : T.warn;
   const instMpg = data.speed < 3 ? null : mpgOf(data.speed, data.fuel);
   const roll100 = mpgOf(trips.rollMi, trips.rollGal);
@@ -638,13 +730,24 @@ export default function RVDashboard() {
         </div>
       )}
 
-      {/* banner */}
-      {banner && (
-        <div className="flash" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, padding: "12px", background: `${bannerColor}1a`, borderTop: `2px solid ${bannerColor}`, color: bannerColor, letterSpacing: "3px", fontWeight: 700, fontSize: 15 }}>
-          <Flame size={20} />
-          {level === "crit" ? "COOLANT CRITICAL — REDUCE LOAD NOW" : "COOLANT HIGH — WATCH TEMPERATURE"}
-          <span style={{ fontFamily: "var(--font-digit)" }}>{na(data.coolant, (v) => Math.round(tmp(v, tu)))}{tmpLabel(tu)}</span>
-          <button onClick={acknowledge} style={ackBtn(bannerColor)}>ACKNOWLEDGE</button>
+      {/* banner — one row per active alarm, sorted most-severe first */}
+      {!muted && alarms.length > 0 && (
+        <div>
+          <div className="flash">
+            {alarms.map((a) => {
+              const c = a.level === "crit" ? T.crit : T.warn;
+              return (
+                <div key={a.key} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, padding: "10px 12px", background: `${c}1a`, borderTop: `2px solid ${c}`, color: c, letterSpacing: "2.5px", fontWeight: 700, fontSize: 15 }}>
+                  <Flame size={19} />
+                  <span>{a.message}</span>
+                  <span style={{ fontFamily: "var(--font-digit)" }}>{a.valueStr}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", justifyContent: "center", padding: "8px", background: "#0810199c", borderTop: "1px solid #12203a" }}>
+            <button onClick={acknowledge} style={ackBtn(bannerColor)}>ACKNOWLEDGE{alarms.length > 1 ? ` ALL (${alarms.length})` : ""}</button>
+          </div>
         </div>
       )}
 
