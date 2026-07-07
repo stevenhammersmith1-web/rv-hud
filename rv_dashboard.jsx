@@ -345,6 +345,33 @@ function useAlertAudio(ready, level, muted) {
   }, [ready, muted, level, beep]);
 }
 
+/* ------------------------------ wake lock -------------------------------- */
+// Hold the screen on while the HUD is open. The OS auto-releases the lock when
+// the page is hidden (screen off / app backgrounded), so re-acquire it whenever
+// the page becomes visible again. Feature-detected — a no-op where unsupported.
+function useWakeLock() {
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("wakeLock" in navigator)) return;
+    let lock = null;
+    let stopped = false;
+    const request = async () => {
+      if (stopped || lock || document.visibilityState !== "visible") return;
+      try {
+        lock = await navigator.wakeLock.request("screen");
+        lock.addEventListener("release", () => { lock = null; });
+      } catch (e) { /* denied (hidden, low battery, etc.) — retry on next visibility */ }
+    };
+    const onVisibility = () => { if (document.visibilityState === "visible") request(); };
+    request();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopped = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (lock) { try { lock.release(); } catch (e) {} lock = null; }
+    };
+  }, []);
+}
+
 /* -------------------------- fuel + trip helpers -------------------------- */
 function fuelGph(speed, rpm, heat) {
   if (speed < 3) return 0.6;
@@ -412,6 +439,7 @@ export default function RVDashboard() {
   const mutedRef = useRef(muted); mutedRef.current = muted;
 
   useAlertAudio(audioReady, level, muted);
+  useWakeLock(); // keep the tablet screen on while the dashboard is open
 
   useEffect(() => {
     const l = document.createElement("link"); l.rel = "stylesheet";
