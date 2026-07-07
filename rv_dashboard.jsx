@@ -458,6 +458,12 @@ export default function RVDashboard() {
 
   const su = settings.speedUnit, tu = settings.tempUnit;
 
+  // Demo controls are hidden in normal (coach) use. The simulator itself stays
+  // intact as the automatic fallback when the bridge is offline — this only
+  // hides the control strip. Append ?dev to the URL to bring the controls back
+  // for development on the simulator.
+  const showDemo = typeof window !== "undefined" && /[?&]dev\b/.test(window.location.search);
+
   // custom layout: settings.widgets is the single source of truth
   const widgets = settings.widgets || DEFAULT_WIDGETS;
   const setWidgets = (updater) => setSettings((s) => {
@@ -636,7 +642,8 @@ export default function RVDashboard() {
         </div>
       )}
 
-      {/* demo panel */}
+      {/* demo panel — hidden in coach use; append ?dev to the URL to show it */}
+      {showDemo && (
       <div style={{ borderTop: "1px solid #12203a", background: "#0810199c" }}>
         <button onClick={() => setPanelOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "transparent", border: "none", color: T.dim, padding: "6px", letterSpacing: "3px", fontSize: 11, cursor: "pointer", fontFamily: "var(--font-label)" }}>
           <Sliders size={13} /> DEMO CONTROLS {panelOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
@@ -664,6 +671,7 @@ export default function RVDashboard() {
           </div>
         )}
       </div>
+      )}
 
       {showSettings && <SettingsPanel settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} night={night}
         profiles={profiles} activeProfileId={activeProfileId} onApplyProfile={applyProfile} onSaveProfileAs={saveProfileAs} onUpdateProfile={updateProfile} onDeleteProfile={deleteProfile} />}
