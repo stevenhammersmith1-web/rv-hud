@@ -15,15 +15,21 @@ import { useBridgeConnection, BridgeStatus } from "./bridgeConnection";
 /* --------------------------------- config -------------------------------- */
 const CONFIG = {
   gauges: {
-    rpm:     { min: 0,   max: 2800, warn: 2200, crit: 2400, redline: 2400, label: "ENGINE",   unit: "RPM" },
+    // Cat C7 ACERT 350hp: rated/governed speed 2400 rpm = factory redline.
+    rpm:     { min: 0,   max: 2800, warn: 2300, crit: 2400, redline: 2400, label: "ENGINE",   unit: "RPM" },
     coolant: { min: 120, max: 250,  warn: 215,  crit: 225,  label: "COOLANT",  unit: "°F", temp: true },
-    oil:     { min: 0,   max: 80,   warnBelow: 18, critBelow: 10, label: "OIL PRESS", unit: "PSI", invert: true },
+    // Cat C7 oil pressure: ~45 psi mid-rpm, idle minimum ~6 psi. Warn early,
+    // flash red only below the factory idle floor.
+    oil:     { min: 0,   max: 80,   warnBelow: 12, critBelow: 6, label: "OIL PRESS", unit: "PSI", invert: true },
   },
   // additional J1939 channels the C7 ECM exposes — assignable to any slot
   channels: {
     boost:    { label: "BOOST",      unit: "psi", min: 0,   max: 35 },
-    trans:    { label: "TRANS TEMP", unit: "°F",  min: 120, max: 260, warn: 230, crit: 250, temp: true },
-    volts:    { label: "BATTERY",    unit: "V",   min: 10,  max: 15,  warnBelow: 12.2, critBelow: 11.6 },
+    // Allison 3000MH: up to ~220°F normal on grades, 250°F max sump temp.
+    trans:    { label: "TRANS TEMP", unit: "°F",  min: 120, max: 260, warn: 240, crit: 250, temp: true },
+    // 12V chassis: healthy charge 13.5-14.8V. Low = discharge/no-charge;
+    // high (warn/crit) = voltage-regulator overcharge cooking the batteries.
+    volts:    { label: "BATTERY",    unit: "V",   min: 10,  max: 15,  warnBelow: 12.2, critBelow: 11.6, warn: 15.0, crit: 15.5 },
     intake:   { label: "INTAKE AIR", unit: "°F",  min: 40,  max: 220, warn: 150, crit: 180, temp: true },
     throttle: { label: "THROTTLE",   unit: "%",   min: 0,   max: 100 },
     fuelrate: { label: "FUEL RATE",  unit: "gph", min: 0,   max: 20 },
