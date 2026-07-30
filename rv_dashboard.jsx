@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useContext, createCont
 import { Volume2, VolumeX, BellOff, Play, Pause, Sliders, Flame, RotateCcw,
   ChevronUp, ChevronDown, Gauge, Route, FastForward, Settings as SettingsIcon,
   X, Sun, Moon, Clock, LayoutGrid, Palette,
-  Pencil, Plus, Trash2, Check, Lock, User } from "lucide-react";
+  Pencil, Plus, Trash2, Check, Lock, User, Thermometer } from "lucide-react";
 import { useBridgeConnection, BridgeStatus } from "./bridgeConnection";
 
 /* ============================================================================
@@ -372,6 +372,118 @@ function useWakeLock() {
   }, []);
 }
 
+/* --------------------------------- clock --------------------------------- */
+// Device wall-clock, ticked once a second. 12-hour time with AM/PM plus a short
+// weekday + date line. Purely local — no network, works fully offline.
+function useClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
+/* --------------------------- outside temperature ------------------------- */
+// Real outdoor temperature from Open-Meteo (free, no API key), located by the
+// tablet's GPS. Fetched on load and every 10 minutes, re-reading position each
+// cycle so it tracks as the coach moves. Stored in °F to match every other
+// temperature in the app (rendered through tmp()/tmpLabel() like the gauges).
+// Degrades gracefully: no geolocation, denied permission, or no internet keeps
+// the last good reading (seeded from storage on startup) — or null → "--".
+const OUTTEMP_KEY = "rvdash:outtemp:v1";
+const OUTTEMP_REFRESH_MS = 10 * 60 * 1000;
+const OUTTEMP_STALE_MS = 60 * 60 * 1000; // dim the reading if it's over an hour old
+
+function useOutsideTemp() {
+  const [tempF, setTempF] = useState(null);      // canonical °F, or null when unknown
+  const [updatedAt, setUpdatedAt] = useState(0); // epoch ms of last good fetch
+  const busyRef = useRef(false);
+
+  const getPosition = useCallback(
+    () =>
+      new Promise((resolve, reject) => {
+        if (typeof navigator === "undefined" || !navigator.geolocation) {
+          reject(new Error("no geolocation"));
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          (p) => resolve(p.coords),
+          (e) => reject(e),
+          { enableHighAccuracy: false, timeout: 15000, maximumAge: 5 * 60 * 1000 }
+        );
+      }),
+    []
+  );
+
+  const refresh = useCallback(async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { latitude, longitude } = await getPosition();
+      const url =
+        `https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(4)}` +
+        `&longitude=${longitude.toFixed(4)}&current=temperature_2m&temperature_unit=fahrenheit`;
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`weather ${res.status}`);
+      const j = await res.json();
+      const t = j && j.current && j.current.temperature_2m;
+      if (typeof t === "number" && !Number.isNaN(t)) {
+        setTempF(t);
+        const at = Date.now();
+        setUpdatedAt(at);
+        pSave(OUTTEMP_KEY, { tempF: t, at });
+      }
+    } catch (e) {
+      /* offline / denied / timeout — keep last value, retry next cycle */
+    } finally {
+      busyRef.current = false;
+    }
+  }, [getPosition]);
+
+  useEffect(() => {
+    // seed from last-known so an offline startup still shows a number
+    pLoad(OUTTEMP_KEY).then((s) => {
+      if (s && typeof s.tempF === "number") {
+        setTempF(s.tempF);
+        setUpdatedAt(s.at || 0);
+      }
+    });
+    refresh();
+    const id = setInterval(refresh, OUTTEMP_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const stale = updatedAt > 0 && Date.now() - updatedAt > OUTTEMP_STALE_MS;
+  return { tempF, updatedAt, stale };
+}
+
+/* --------------------- header clock + outside-temp cluster --------------- */
+function HeaderStatus({ now, out, tu }) {
+  const { T } = useUI();
+  const time = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+  const date = now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  const hasTemp = isNum(out.tempF);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
+        <span style={{ fontFamily: "var(--font-digit)", fontWeight: 700, fontSize: 22, color: T.text, letterSpacing: "1px" }}>{time}</span>
+        <span style={{ color: T.dim, fontSize: 11, letterSpacing: "2px", marginTop: 3, textTransform: "uppercase" }}>{date}</span>
+      </div>
+      <div
+        title={hasTemp ? (out.stale ? "Outside temp — no recent update" : "Outside temperature") : "Outside temp unavailable (needs internet + location)"}
+        style={{ display: "flex", alignItems: "center", gap: 6, opacity: hasTemp && out.stale ? 0.55 : 1 }}
+      >
+        <Thermometer size={16} color={hasTemp ? T.accent : T.dim} />
+        <span style={{ fontFamily: "var(--font-digit)", fontWeight: 700, fontSize: 20, color: hasTemp ? T.text : T.dim }}>
+          {hasTemp ? Math.round(tmp(out.tempF, tu)) : "--"}
+        </span>
+        <span style={{ color: T.dim, fontSize: 12 }}>{tmpLabel(tu)}</span>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------------- fuel + trip helpers -------------------------- */
 function fuelGph(speed, rpm, heat) {
   if (speed < 3) return 0.6;
@@ -440,6 +552,8 @@ export default function RVDashboard() {
 
   useAlertAudio(audioReady, level, muted);
   useWakeLock(); // keep the tablet screen on while the dashboard is open
+  const now = useClock();          // device clock for the header (ticks every second)
+  const outside = useOutsideTemp(); // real outdoor temp via GPS + Open-Meteo
 
   useEffect(() => {
     const l = document.createElement("link"); l.rel = "stylesheet";
@@ -635,8 +749,11 @@ export default function RVDashboard() {
 
       {/* header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 24px", borderBottom: "1px solid #12203a" }}>
-        <div style={{ letterSpacing: "4px", fontSize: 13, color: T.dim, fontWeight: 600, minWidth: 150 }}>
-          JOURNEY&nbsp;39K <span style={{ opacity: .5 }}>·</span> CAT&nbsp;C7&nbsp;350
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 220 }}>
+          <div style={{ letterSpacing: "3px", fontSize: 11, color: T.dim, fontWeight: 600 }}>
+            JOURNEY&nbsp;39K <span style={{ opacity: .5 }}>·</span> CAT&nbsp;C7&nbsp;350
+          </div>
+          <HeaderStatus now={now} out={outside} tu={tu} />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <Tab active={view === "dash"} onClick={() => setView("dash")} icon={<Gauge size={15} />} label="DASH" />
