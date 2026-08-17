@@ -65,10 +65,35 @@ const RECONNECT_MAX_MS = 8000; // backoff cap while waiting for ignition
 //  18   uint8    throttlePct     (0xFF   = n/a)
 //  19   uint16   fuelLphX100     (0xFFFF = n/a)
 //  21   uint32   engineHoursX20  (0xFFFFFFFF = n/a)
+// Warn once per reason, so a silent mismatch can't masquerade as "no data".
+// The packet is 25 B, which is larger than the 20 B payload of the default
+// 23 B ATT MTU. The firmware asks for 185, but MTU is negotiated by the
+// central — if it stays at the default, every notification arrives truncated
+// and the dashboard would sit at "No data" with a perfectly healthy link.
+const warned = new Set();
+function warnOnce(key, msg) {
+  if (warned.has(key)) return;
+  warned.add(key);
+  if (typeof console !== "undefined") console.warn(`[bridge] ${msg}`);
+}
+
 export function parseBridgePacket(dataView) {
-  if (dataView.byteLength < PACKET_LENGTH) return null;
+  if (dataView.byteLength < PACKET_LENGTH) {
+    warnOnce(
+      "short",
+      `packet truncated: got ${dataView.byteLength} B, need ${PACKET_LENGTH}. ` +
+        `Likely an un-negotiated ATT MTU (default caps payload at 20 B).`
+    );
+    return null;
+  }
   const version = dataView.getUint8(0);
-  if (version !== PACKET_VERSION) return null;
+  if (version !== PACKET_VERSION) {
+    warnOnce(
+      "version",
+      `packet version ${version}, expected ${PACKET_VERSION} — firmware and app are out of sync.`
+    );
+    return null;
+  }
 
   const u16 = (off) => {
     const v = dataView.getUint16(off, true);

@@ -30,6 +30,8 @@ different devices. They are not interchangeable — one broadcasts, one receives
 | `rv_hud_bridge.ino` | ESP32 DevKitC + SN65HVD230 | Arduino C++ | Reads CAN, **broadcasts** the packet over BLE |
 | `bridgeConnection.jsx` | Tablet browser | JavaScript (React hook) | **Receives** & parses the packet |
 | `rv_dashboard.jsx` | Tablet browser | JavaScript (React) | Renders gauges, trips, alerts |
+| `rv_hud_sniffer.ino` | ESP32 (temporary) | Arduino C++ | Diagnostic: what is actually on the bus |
+| `rv_hud_selftest.ino` | ESP32 (bench only) | Arduino C++ | Diagnostic: is the transceiver wired & alive |
 
 `bridgeConnection.jsx` is **browser code — it does not get flashed to the ESP32.**
 The only thing both sides must agree on is the BLE contract below.
@@ -124,6 +126,53 @@ Wiring and pin assignments are documented in the file header.
 
 The bus is read **listen-only** — the device physically cannot transmit onto the
 coach's CAN bus.
+
+---
+
+## Diagnosing "no live data"
+
+The bridge's serial console (115200 baud) prints a `[STATUS]` heartbeat every
+2 s. Two counters separate the failure modes:
+
+- `bus=` — every frame the CAN controller accepted, before any filtering
+- `decoded=` — only frames matching a PGN in `decodeFrame()`
+
+| Symptom | Meaning |
+|---------|---------|
+| `bus=0`, `busErr=0` | Nothing on the wire. Connector, key off, or bad wiring. |
+| `bus=0`, `busErr` climbing | Wire is live but misread — wrong bitrate, or CANH/CANL swapped. |
+| `bus>0`, `decoded=0` | **Wiring is fine.** The PGNs or byte offsets are wrong. Check `lastUnknownPgn=`. |
+| `ble=advertising` forever | Tablet never linked. A CAN fix won't help; debug the BLE half. |
+
+### `rv_hud_sniffer.ino` — what's actually on the bus
+
+Listen-only, safe on a live coach bus. Auto-scans 250k/500k/125k, locks onto
+whichever sees traffic, then prints raw frames (full 29-bit ID, priority, PGN,
+source address, payload) and a running PGN histogram. Use this to learn what the
+engine really broadcasts and to verify the decode offsets by hand.
+
+### `rv_hud_selftest.ino` — is the bridge hardware good
+
+> ⚠️ **Bench only. This firmware TRANSMITS.** Never run it while the 9-pin is
+> plugged into the coach.
+
+Three checks, no CAN bus required:
+
+1. **RX drive** — is the transceiver powered and out of standby (does it hold
+   GPIO22 high against an internal pulldown)?
+2. **Static driver** — bit-bangs CTX and watches CRX. A clean dominant readback
+   proves GPIO21→CTX, CRX→GPIO22, and that `Rs` (pin 8) is tied low.
+3. **TWAI loopback** — transmits at 250k with self-reception.
+
+On an unterminated bench the static test passes while the loopback fails, and
+recessive reads well under 100% — that is expected, not a fault. Add a 120 Ω
+resistor across CANH/CANL to make it pass.
+
+### Web Bluetooth needs a secure context
+
+`http://<lan-ip>:5173` will **not** work — `navigator.bluetooth` is undefined on
+plain-HTTP origins. Use `localhost` on the dev machine, or the HTTPS Pages URL
+on the tablet.
 
 ---
 

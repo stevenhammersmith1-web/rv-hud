@@ -74,8 +74,14 @@ typedef struct __attribute__((packed)) {
 } BridgePacket;
 
 static BridgePacket pkt;
-static uint32_t lastFrameMs = 0;
-static uint32_t frameCount  = 0;
+static uint32_t lastFrameMs    = 0;  // last frame of ANY kind
+static uint32_t allFrames      = 0;  // every frame the controller accepted
+static uint32_t decodedFrames  = 0;  // frames matching a PGN we actually decode
+static uint32_t lastUnknownPgn = 0;  // most recent PGN we saw but ignored
+
+// Counting only decoded frames made "dead wire" and "busy bus, none of my PGNs"
+// look identical from the serial log. These are tracked separately so the two
+// can be told apart at the coach without reflashing the sniffer.
 
 // ---------- BLE state ----------
 static BLECharacteristic *bleChar = nullptr;
@@ -217,10 +223,10 @@ static void decodeFrame(const twai_message_t &m) {
       break;
     }
     default:
-      return; // not a PGN we care about
+      lastUnknownPgn = j1939Pgn(m.identifier); // seen but not decoded
+      return;
   }
-  lastFrameMs = millis();
-  frameCount++;
+  decodedFrames++;
 }
 
 #if DEMO_MODE
@@ -238,6 +244,8 @@ static void fabricateDemoData() {
   pkt.fuelLphX100    = 1450;
   pkt.engineHoursX20 = 123456UL * 20UL / 20UL + (uint32_t)(t / 180.0f);
   lastFrameMs = millis();
+  allFrames++;
+  decodedFrames++;
 }
 #endif
 
@@ -261,6 +269,10 @@ void loop() {
   // Drain everything waiting in the RX queue (bus is busy at 250k)
   twai_message_t msg;
   while (twai_receive(&msg, 0) == ESP_OK) {
+    // Count before any filtering so canAlive reflects real bus activity even
+    // when nothing we decode is being broadcast.
+    allFrames++;
+    lastFrameMs = millis();
     decodeFrame(msg);
   }
 #else
@@ -283,10 +295,22 @@ void loop() {
   // Serial heartbeat every 2 s for bench debugging
   if (now - lastStatsMs >= 2000) {
     lastStatsMs = now;
-    Serial.printf("[STATUS] frames=%lu alive=%u rpm=%u kphX100=%u coolC10=%d oilKpa=%u ble=%s\n",
-                  (unsigned long)frameCount, pkt.canAlive, pkt.rpm,
-                  pkt.speedKphX100, pkt.coolantCX10, pkt.oilKpa,
+    Serial.printf("[STATUS] bus=%lu decoded=%lu alive=%u lastUnknownPgn=%lu "
+                  "rpm=%u kphX100=%u coolC10=%d oilKpa=%u ble=%s\n",
+                  (unsigned long)allFrames, (unsigned long)decodedFrames,
+                  pkt.canAlive, (unsigned long)lastUnknownPgn,
+                  pkt.rpm, pkt.speedKphX100, pkt.coolantCX10, pkt.oilKpa,
                   deviceConnected ? "connected" : "advertising");
+#if !DEMO_MODE
+    // bus>0 with decoded=0 means the wire is fine and the PGNs or byte offsets
+    // are wrong. bus=0 with busErr>0 means wrong bitrate or swapped CANH/CANL.
+    twai_status_info_t s;
+    if (twai_get_status_info(&s) == ESP_OK && (allFrames == 0 || decodedFrames == 0)) {
+      Serial.printf("         [CAN] rxErr=%u busErr=%u rxMissed=%u queued=%u\n",
+                    (unsigned)s.rx_error_counter, (unsigned)s.bus_error_count,
+                    (unsigned)s.rx_missed_count, (unsigned)s.msgs_to_rx);
+    }
+#endif
   }
 
   delay(5);
