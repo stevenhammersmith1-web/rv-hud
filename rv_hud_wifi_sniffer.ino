@@ -28,7 +28,26 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
+#include "esp_netif.h"
 #include "driver/twai.h"
+
+/*
+ * Who is going to view this page?
+ *
+ * 0 = LAPTOP (default). The AP hands out an IP address ONLY - no gateway, no
+ *     DNS. The laptop keeps its real default route and resolver on whatever
+ *     else it is using (Bluetooth tethering, a second NIC), while 192.168.4.x
+ *     stays reachable because it is on-link. Without this, Windows installs a
+ *     default route pointing at the ESP32 AND uses the wildcard DNS below as
+ *     its resolver, so every hostname on the machine resolves to 192.168.4.1
+ *     and all internet access dies while the sniffer is connected.
+ *
+ * 1 = PHONE. Offers gateway + DNS so Android's captive-portal check resolves
+ *     and lands on /generate_204. Needed to stop the phone dropping the
+ *     network, but it hijacks DNS for anything that has no other resolver.
+ */
+#define OFFER_GATEWAY_DNS 0
 
 #define CAN_TX_PIN GPIO_NUM_21
 #define CAN_RX_PIN GPIO_NUM_22
@@ -54,6 +73,14 @@
 #define PGN_HOURS  65253
 
 WebServer server(80);
+
+// Wildcard DNS. Without this the AP hands out a lease with no usable resolver,
+// so the phone cannot even look up its connectivity-check host - the probe
+// never becomes an HTTP request, the OS decides there is no internet, and it
+// drops the network after ~30 s. Resolving every name to ourselves lets the
+// probe land on /generate_204 (which answers 204), so the OS treats this as a
+// normal working network and stays associated.
+DNSServer dnsServer;
 
 typedef struct { const char *name; twai_timing_config_t timing; } BitrateOption;
 static BitrateOption BITRATES[] = {
@@ -290,6 +317,22 @@ async function tick(){
 tick();setInterval(tick,500);
 </script></body></html>)PAGE";
 
+static void onWiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      Serial.println("[WIFI] station JOINED"); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      Serial.println("[WIFI] station LEFT"); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
+      Serial.println("[WIFI] station got a DHCP lease"); break;
+    default: break;
+  }
+}
+
+static void logReq() {
+  Serial.printf("[HTTP] %s\n", server.uri().c_str());
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
@@ -297,6 +340,7 @@ void setup() {
 
   memset(&dec, 0, sizeof(dec));
 
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
   Serial.println();
@@ -304,13 +348,74 @@ void setup() {
   Serial.printf("AP SSID: %s   pass: %s\n", AP_SSID, AP_PASS);
   Serial.print("Open: http://"); Serial.println(WiFi.softAPIP());
 
-  server.on("/", []() { server.send_P(200, "text/html", PAGE); });
+#if !OFFER_GATEWAY_DNS
+  // Strip the router and DNS options out of the DHCP offer. The lease still
+  // carries an address and netmask, so the client can reach 192.168.4.1 as an
+  // on-link destination, but it will not route the internet here or ask us to
+  // resolve names.
+  {
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap) {
+      uint8_t off = 0;
+      esp_netif_dhcps_stop(ap);
+      esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &off, sizeof(off));
+      esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &off, sizeof(off));
+      esp_netif_dhcps_start(ap);
+      Serial.println("[DHCP] address only - no gateway, no DNS (laptop mode)");
+    } else {
+      Serial.println("[DHCP] WARNING: could not get AP netif handle");
+    }
+  }
+#endif
+
+  server.on("/", []() { logReq(); server.send_P(200, "text/html", PAGE); });
   server.on("/data", []() {
+    logReq();
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", statusJson());
   });
-  server.onNotFound([]() { server.sendHeader("Location", "/"); server.send(302, "text/plain", ""); });
+
+  // Connectivity checks. Android probes /generate_204 the moment it joins; if
+  // the reply is anything but a bare 204 it decides this is a captive portal,
+  // keeps the phone routed over cellular, and 192.168.4.1 becomes unreachable
+  // even though the WiFi shows connected. Answering the probes honestly-enough
+  // makes the OS treat the AP as a normal network and route to it.
+  auto noContent = []() { logReq(); server.send(204, "text/plain", ""); };
+  server.on("/generate_204", noContent);
+  server.on("/gen_204", noContent);
+  server.on("/connecttest.txt", noContent);
+  server.on("/ncsi.txt", noContent);
+  server.on("/hotspot-detect.html", []() {   // iOS / macOS
+    logReq();
+    server.send(200, "text/html",
+                "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+  });
+  server.on("/library/test/success.html", []() {
+    logReq();
+    server.send(200, "text/html",
+                "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+  });
+
+  // Serve the page for anything else rather than redirecting - a 302 here is
+  // what trips the captive-portal detector.
+  server.onNotFound([]() { logReq(); server.send_P(200, "text/html", PAGE); });
   server.begin();
+
+#if OFFER_GATEWAY_DNS
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  if (dnsServer.start(53, "*", WiFi.softAPIP())) {
+    Serial.println("[DNS] wildcard resolver up on 53");
+  } else {
+    Serial.println("[DNS] FAILED to start on 53");
+  }
+#else
+  // Deliberately NOT started. ESP-IDF still advertises this AP as a DNS server
+  // in the DHCP lease and ignores the option that should suppress it, so the
+  // only reliable way to stop hijacking the client's name resolution is to
+  // leave port 53 dead. The client's query goes unanswered here and it falls
+  // through to its real resolver on the other interface.
+  Serial.println("[DNS] resolver disabled (laptop mode) - names resolve elsewhere");
+#endif
 
   scanStartMs = millis();
   driverUp = canStart(BITRATES[scanIdx].timing);
@@ -318,6 +423,9 @@ void setup() {
 }
 
 void loop() {
+#if OFFER_GATEWAY_DNS
+  dnsServer.processNextRequest();
+#endif
   server.handleClient();
 
   uint32_t now = millis();
@@ -344,5 +452,14 @@ void loop() {
     lastRateFrames = totalFrames;
     lastRateMs    = now;
     digitalWrite(LED_PIN, framesPerSec > 0);
+  }
+
+  // Heartbeat so a bench USB session can tell "phone never associated" from
+  // "phone associated but never issued an HTTP request".
+  static uint32_t lastWifiMs = 0;
+  if (now - lastWifiMs >= 3000) {
+    lastWifiMs = now;
+    Serial.printf("[WIFI] stations=%u  frames=%lu\n",
+                  WiFi.softAPgetStationNum(), (unsigned long)totalFrames);
   }
 }
