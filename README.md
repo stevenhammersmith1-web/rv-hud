@@ -30,7 +30,8 @@ different devices. They are not interchangeable — one broadcasts, one receives
 | `rv_hud_bridge.ino` | ESP32 DevKitC + SN65HVD230 | Arduino C++ | Reads CAN, **broadcasts** the packet over BLE |
 | `bridgeConnection.jsx` | Tablet browser | JavaScript (React hook) | **Receives** & parses the packet |
 | `rv_dashboard.jsx` | Tablet browser | JavaScript (React) | Renders gauges, trips, alerts |
-| `rv_hud_sniffer.ino` | ESP32 (temporary) | Arduino C++ | Diagnostic: what is actually on the bus |
+| `rv_hud_sniffer.ino` | ESP32 (temporary) | Arduino C++ | Diagnostic: what is actually on the bus (serial) |
+| `rv_hud_wifi_sniffer.ino` | ESP32 (temporary) | Arduino C++ | Same, served over its own WiFi AP — no laptop needed |
 | `rv_hud_selftest.ino` | ESP32 (bench only) | Arduino C++ | Diagnostic: is the transceiver wired & alive |
 
 `bridgeConnection.jsx` is **browser code — it does not get flashed to the ESP32.**
@@ -150,6 +151,22 @@ Listen-only, safe on a live coach bus. Auto-scans 250k/500k/125k, locks onto
 whichever sees traffic, then prints raw frames (full 29-bit ID, priority, PGN,
 source address, payload) and a running PGN histogram. Use this to learn what the
 engine really broadcasts and to verify the decode offsets by hand.
+
+### `rv_hud_wifi_sniffer.ino` — same, without a laptop
+
+The bridge is powered from the buck converter off J1939 pin B, and USB must
+never be plugged in at the same time (two supplies on the same 5 V rail). That
+makes a serial console at the coach awkward, so this build serves the same
+diagnostic over its own WiFi access point instead. No wiring changes.
+
+1. Plug the 9-pin in, key ON.
+2. Join WiFi **`RV-HUD-SNIFF`**, password **`rvhudcan`**.
+3. Open **http://192.168.4.1** on a phone or the tablet.
+
+Auto-refreshes twice a second: lock state and bitrate, TWAI health, every PGN
+with source address / count / age / payload, the last 16 raw frames, and the
+decoded gauge values using the same offsets as `rv_hud_bridge.ino`. Frames
+flowing but a gauge reading wrong means the offsets are the bug, not the wiring.
 
 ### `rv_hud_selftest.ino` — is the bridge hardware good
 
